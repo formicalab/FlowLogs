@@ -66,17 +66,17 @@ function New-CSV {
 
         $flowlog = $_
 
-        if ($flowlog.TargetResourceId -like "*resourceGroups*") {
-            $flowlogType = "NSG"
-        }
-        elseif ($flowlog.TargetResourceId -like "*virtualNetworks*") {
-            $flowlogType = "VNet"
+        if ($flowlog.TargetResourceId -like "*networkInterfaces*") {
+            $flowlogType = "NIC"
         }
         elseif ($flowlog.TargetResourceId -like "*subnets*") {
             $flowlogType = "Subnet"
         }
-        elseif ($flowlog.TargetResourceId -like "*networkInterfaces*") {
-            $flowlogType = "NIC"
+        elseif ($flowlog.TargetResourceId -like "*virtualNetworks*") {
+            $flowlogType = "VNet"
+        }
+        elseif ($flowlog.TargetResourceId -like "*networkSecurityGroups*") {
+            $flowlogType = "NSG"
         }
         else {
             $flowlogType = "Unknown"
@@ -104,7 +104,18 @@ function New-CSV {
     }
 
     # print the flow logs
-    $flowlogs | Format-Table -AutoSize
+
+    $flowlogs | ForEach-Object {
+        $statusColor = "Cyan"
+        if ($_.Status -like "*Enabled*") {
+            $statusColor = "Green"
+        } elseif ($_.Status -like "*Disabled*") {
+            $statusColor = "Yellow"
+        }
+        Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
+        Write-Host ("({0}) " -f $_.TargetResourceType) -ForegroundColor Cyan -NoNewline
+        Write-Host $_.Status -ForegroundColor $statusColor
+    }
 
     # export the list of flow logs to a CSV file
     $flowlogs | Export-Csv -Path $CSVFile -NoTypeInformation
@@ -139,11 +150,19 @@ function Set-CSV {
 
         $flowlog = $_
 
+        $networkWatcherflowlog = $null
         # get the flow log
-        $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -NetworkWatcher $using:networkWatcher -Name $flowlog.Name
+        try {
+            $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -NetworkWatcher $using:networkWatcher -Name $flowlog.Name -ErrorAction Stop          
+        }
+        catch {
+            $action = "FAILED to get: $($_.Exception.Message)"
+        }
 
-        # enable or disable the flow log
-        if ($flowlog.Status -eq "Enabled") {
+        if (-not $networkWatcherflowlog) {
+            # if the flow log is not found, skip it
+        }
+        elseif ($flowlog.Status -eq "Enabled") {
             if (-not $networkWatcherflowlog.Enabled) {
                 $networkWatcherflowlog.Enabled = $true
                 try {
@@ -236,7 +255,7 @@ if (-not (Get-AzContext)) {
 
 # change the context to the specified subscription if needed
 if ((Get-AzContext).Subscription.Name -ne $SubscriptionName) {
-    Set-AzContext -SubscriptionName $SubscriptionName
+    Set-AzContext -SubscriptionName $SubscriptionName | Out-Null
 }
 
 # if GenerateCSV is specified, generate the CSV file and exit
