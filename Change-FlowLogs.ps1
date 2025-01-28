@@ -46,7 +46,6 @@ param(
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
 
 #############
 # FUNCTIONS #
@@ -130,46 +129,94 @@ function Set-CSV {
 
     # read the CSV file
     Write-Host "Reading CSV file $CSVFile..."
-    $flowlogs = Import-Csv -Path $CSVFile
+    $csvFlowlogs = Import-Csv -Path $CSVFile
+
+    $processedFlowlogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     # process the flow logs in parallel
-    $flowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
+    Write-Host "Processing flow logs: "
+    $csvFlowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
 
         $flowlog = $_
 
         # get the flow log
         $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -NetworkWatcher $using:networkWatcher -Name $flowlog.Name
-        Write-Host -NoNewline "Flow log "
-        Write-Host -NoNewLine -ForegroundColor DarkYellow "$($flowlog.Name): "
 
         # enable or disable the flow log
         if ($flowlog.Status -eq "Enabled") {
             if (-not $networkWatcherflowlog.Enabled) {
                 $networkWatcherflowlog.Enabled = $true
-                $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference | Out-Null
-                Write-Host -ForegroundColor Green "Enabled."
+                try {
+                    $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
+                    $action = "Enabled"                        
+                }
+                catch {
+                    $action = "FAILED to enable: $($_.Exception.Message)"
+                }
             }
             else {
-                Write-Host "Ignored (already enabled)." -ForegroundColor Cyan
+                $action = "Ignored (already enabled)"
             }
         }
         elseif ($flowlog.Status -eq "Disabled") {
             if ($networkWatcherflowlog.Enabled) {
                 $networkWatcherflowlog.Enabled = $false
-                $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference | Out-Null
-                Write-Host -ForegroundColor Yellow "Disabled."
+                try {
+                    $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
+                    $action = "Disabled"                        
+                }
+                catch {
+                    $action = "FAILED to disable: $($_.Exception.Message)"
+                }
             }
             else {
-                Write-Host "Ignored (already disabled)." -ForegroundColor Cyan
+                $action = "Ignored (already disabled)"
             }
         }
         elseif ($flowlog.Status -eq "Deleted") {
-            Remove-AzNetworkWatcherFlowLog -ResourceId $networkWatcherflowlog.Id -WhatIf:$using:WhatIfPreference | Out-Null
-            Write-Host "Deleted." -ForegroundColor Red
+            try {
+                Remove-AzNetworkWatcherFlowLog -ResourceId $networkWatcherflowlog.Id -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null                
+                $action = "Deleted"
+            }
+            catch {
+                $action = "FAILED to delete: $($_.Exception.Message)"
+            }
         }
         else {
             throw "Invalid status $($flowlog.Status) for flow log $($flowlog.Name)"
         }
+
+        # log the action done on flow log
+        $fl = [PSCustomObject]@{
+            Name               = $flowlog.Name
+            Action             = $action
+        }
+        
+        # add the object to the list of flow logs
+        ($using:processedFlowlogs).Add($fl)
+
+        # write progress dots
+        Write-Host -NoNewline "." -ForegroundColor DarkGray
+    }
+
+    # print the processed flow logs with colored "Action" column
+    Write-Host
+    $processedFlowlogs | ForEach-Object {
+        $actionColor = "Cyan"
+        if ($_.Action -like "*FAILED*") {
+            $actionColor = "Red"
+        } elseif ($_.Action -like "*Deleted*") {
+            $actionColor = "DarkYellow"
+        } elseif ($_.Action -like '*Ignored*') {
+            $actionColor = "DarkGray"
+        } elseif ($_.Action -like "*Enabled*") {
+            $actionColor = "Green"
+        } elseif ($_.Action -like "*Disabled*") {
+            $actionColor = "Yellow"
+        }
+
+        Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
+        Write-Host $_.Action -ForegroundColor $actionColor
     }
 }
 
