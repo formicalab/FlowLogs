@@ -17,14 +17,14 @@
     .PARAMETER CSVFile
     The path to the CSV file containing the list of NSG flow logs
 
-    .PARAMETER NewCSV
+    .PARAMETER ExportCSV
     Generate a CSV file with the list of NSG flow logs in the given subscription and Location
 
-    .PARAMETER SetCSV
+    .PARAMETER ImportCSV
     Read a CSV file with the list of NSG flow logs in the given subscription and Location and enable/disable/remove them according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted")
 
     .EXAMPLE
-    .\Change-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location ItalyNorth -CSVFile .\flowlogs.csv -SetCSV
+    .\Change-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location ItalyNorth -CSVFile .\flowlogs.csv -ImportCSV
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -39,10 +39,10 @@ param(
     [string]$CSVFile,
 
     [Parameter(Mandatory = $false, HelpMessage = "Generate a CSV file with the list of NSG flow logs in the given subscription and Location")]
-    [switch]$NewCSV,
+    [switch]$ExportCSV,
 
     [Parameter(Mandatory = $false, HelpMessage = "Read a CSV file with the list of NSG flow logs in the given subscription and Location and enable/disable/delete them according to the Status column in the CSV file")]
-    [switch]$SetCSV
+    [switch]$ImportCSV
 )
 
 Set-StrictMode -Version Latest
@@ -51,8 +51,8 @@ Set-StrictMode -Version Latest
 # FUNCTIONS #
 #############
 
-### New-CSV ###
-function New-CSV {
+### ExportCSV ###
+function ExportCSV {
     $networkWatcher = Get-AzNetworkWatcher -Location $Location
     if (-not $networkWatcher) {
         throw "Network Watcher not found in Location $Location"
@@ -122,9 +122,9 @@ function New-CSV {
     Write-Host "CSV file $CSVFile generated."
 }
 
-### Set-CSV ###
+### ImportCSV ###
 
-function Set-CSV {
+function ImportCSV {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param()
     
@@ -140,7 +140,13 @@ function Set-CSV {
 
     # read the CSV file
     Write-Host "Reading CSV file $CSVFile..."
-    $csvFlowlogs = Import-Csv -Path $CSVFile
+    $csvFlowlogs = $null
+    try {
+        $csvFlowlogs = Import-Csv -Path $CSVFile -ErrorAction Stop        
+    }
+    catch {
+        throw "Failed to read CSV file $($CSVFile): $($_.Exception.Message)"
+    }
 
     $processedFlowlogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
@@ -245,28 +251,33 @@ function Set-CSV {
 
 # verify that Az module is installed
 if (-not (Get-Module -Name Az -ListAvailable)) {
-    throw "You must install the Az module before running this script"
+    throw "Please install the Az module before running this script"
 }
 
 # verify that we have an active context
 if (-not (Get-AzContext)) {
-    throw "You must be logged in to Azure before running this script (use: Connect-AzAccount)"
+    throw "Please log in to Azure before running this script (use: Connect-AzAccount)"
 }
 
 # change the context to the specified subscription if needed
-if ((Get-AzContext).Subscription.Name -ne $SubscriptionName) {
-    Set-AzContext -SubscriptionName $SubscriptionName | Out-Null
+try {
+    if ((Get-AzContext).Subscription.Name -ne $SubscriptionName) {
+        Set-AzContext -SubscriptionName $SubscriptionName -ErrorAction Stop | Out-Null
+    }        
+}
+catch {
+    throw "Failed to set subscription to $($SubscriptionName): $($_.Exception.Message)"
 }
 
 # if GenerateCSV is specified, generate the CSV file and exit
-if ($SetCSV) {
-    Set-CSV
+if ($ImportCSV) {
+    ImportCSV
 }
 
-elseif ($NewCSV) {
-    New-CSV
+elseif ($ExportCSV) {
+    ExportCSV
 }
 
 else {
-    throw "You must specify either -NewCSV or -SetCSV"
+    throw "Please specify either -ExportCSV or -ImportCSV"
 }
