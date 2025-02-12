@@ -14,7 +14,7 @@ Once the CSV has been edited to specify which flows should be enabled, disabled 
 
 You can use `-SubscriptionFilter` <subscription name> to limit actions to a specific subscription, instead of all:
 
-        .\Update-FlowLogs.ps1 -SubscriptionFilter POSTE-PRODUZIONE -Location westeurope -CSVFile .\flowlogs.csv -ExportCSV
-        .\Update-FlowLogs.ps1 -SubscriptionFilter POSTE-PRODUZIONE -Location westeurope -CSVFile .\flowlogs.csv -ExportCSV
+        .\Update-FlowLogs.ps1 -SubscriptionFilter SUB-PRODUZIONE -Location westeurope -CSVFile .\flowlogs.csv -ExportCSV
+        .\Update-FlowLogs.ps1 -SubscriptionFilter SUB-PRODUZIONE -Location westeurope -CSVFile .\flowlogs.csv -ExportCSV
 
 
