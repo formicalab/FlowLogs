@@ -1,15 +1,16 @@
 #requires -version 7
 <#
     .SYNOPSIS
-    Extracts / process a list of flow logs in a given subscription and location
+    Extracts / process a list of flow logs
 
     .DESCRIPTION
-    This script extracts a list of flow logs in a given subscription and location and generates a CSV file with the list of flow logs.
-    The CSV file can be edited and passed again to the script to enable/disable/delete the flow logs according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted").
+    This script extracts and saves into a CSV file the list of all flow logs found in one or all subscriptions, and a given location.
+    The CSV file can be edited and passed again to the script to enable/disable/delete the flow logs, according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted").
     By specifying -WhatIf, the script will only show what would be done without actually doing it.
+    If the subscription name is not specified, the script will use all subscriptions contained in the file also during the import phase; otherwise, only the specified subscription will be processed.
 
-    .PARAMETER SubscriptionName
-    The name of the subscription to use.
+    .PARAMETER SubscriptionFilter
+    The name of the subscription to use. If not specified, all subscriptions will be used.
 
     .PARAMETER Location
     The Location to use.
@@ -24,13 +25,13 @@
     Read a CSV file with the list of NSG flow logs in the given subscription and Location and enable/disable/remove them according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted")
 
     .EXAMPLE
-    .\Change-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location ItalyNorth -CSVFile .\flowlogs.csv -ImportCSV
+    .\Change-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location italynorth -CSVFile .\flowlogs.csv -ImportCSV
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true, HelpMessage = "Specify the subscription name")]
-    [string]$SubscriptionName,
+    [Parameter(Mandatory = $false, HelpMessage = "Specify the name of subscription to use. If not specified, all subscriptions will be used")]
+    [string]$SubscriptionFilter,
 
     [Parameter(Mandatory = $false, HelpMessage = "Specify the Location to use")]
     [string]$Location,
@@ -47,74 +48,110 @@ param(
 
 Set-StrictMode -Version Latest
 
-#############
-# FUNCTIONS #
-#############
-
+#################
 ### ExportCSV ###
+#################
 function ExportCSV {
-    $networkWatcher = Get-AzNetworkWatcher -Location $Location
-    if (-not $networkWatcher) {
-        throw "Network Watcher not found in Location $Location"
+
+    # if no subscription filter is specified, get all subscriptions
+    if (-not $SubscriptionFilter) {
+        Write-Host "No subscription filter specified. Getting the list of all subscriptions."
+        $subscriptions = (Get-AzSubscription).Name
+        if (-not $subscriptions) {
+            throw "No subscriptions found - check your permissions."
+        }
+    }
+    else {
+        Write-Host "Note: a specific subscription was specified: $($SubscriptionFilter): processing only flow logs in this subscription." -ForegroundColor Yellow
+        # put the single subscription name into an array
+        $subscriptions = @($SubscriptionFilter)
     }
 
-    $networkWatcherflowlogs = Get-AzNetworkWatcherFlowLog -NetworkWatcher $networkWatcher
+    $currentSubscription = (Get-AzContext).Subscription.Name
+    $flowlogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()    # thread-safe list of flow logs
 
-    # show the list of flow logs. For each one, take the name, the target resource (detects if NSG, VNet, subnet or single nic) and the status
-    $flowlogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
-    $networkWatcherflowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
+    # loop through all subscriptions
+    foreach ($subscription in $subscriptions) {
 
-        $flowlog = $_
+        Write-Host ("{0} ({1}): " -f $subscription, $Location) -NoNewline
 
-        if ($flowlog.TargetResourceId -like "*networkInterfaces*") {
-            $flowlogType = "NIC"
+        # change the context to the specified subscription if needed
+        if ($subscription -ne $currentSubscription) {
+            try {
+                Set-AzContext -SubscriptionName $subscription -ErrorAction Stop | Out-Null
+                $currentSubscription = $subscription
+            }
+            catch {
+                throw "Failed to set subscription to $($subscription): $($_.Exception.Message)"
+            }
         }
-        elseif ($flowlog.TargetResourceId -like "*subnets*") {
-            $flowlogType = "Subnet"
-        }
-        elseif ($flowlog.TargetResourceId -like "*virtualNetworks*") {
-            $flowlogType = "VNet"
-        }
-        elseif ($flowlog.TargetResourceId -like "*networkSecurityGroups*") {
-            $flowlogType = "NSG"
+
+        $networkWatcherflowlogs = Get-AzNetworkWatcherFlowLog -Location $Location -ErrorAction SilentlyContinue
+        if ($null -eq $networkWatcherflowlogs) {
+            Write-Host "No flow logs found, skipping" -ForegroundColor DarkGray
+            continue
         }
         else {
-            $flowlogType = "Unknown"
+            $networkWatcherflowLogCount = if ($networkWatcherflowlogs -is [array]) { $networkWatcherflowlogs.Count } else { 1 }
+            Write-Host "$networkWatcherflowLogCount flow logs found:"
         }
 
-        # extract the resource group name from the target resource id
-        $ResourceGroupName = ($flowlog.TargetResourceId -split "/")[4]
+        # Prepare the list of flow logs. For each one, take the name, the target resource (detects if NSG, VNet, subnet or single nic) and the status
+        $networkWatcherflowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
 
-        # extract the resource name from the target resource id
-        $ResourceName = ($flowlog.TargetResourceId -split "/")[-1]
+            $flowlog = $_
 
-        # create flow log object
-        $fl = [PSCustomObject]@{
-            Name               = $flowlog.Name
-            SubscriptionName   = $using:SubscriptionName
-            Location           = $using:Location
-            ResourceGroup      = $ResourceGroupName
-            TargetResourceName = $ResourceName
-            TargetResourceType = $flowlogType
-            Status             = if ($flowlog.Enabled) { "Enabled" } else { "Disabled" }
+            if ($flowlog.TargetResourceId -like "*networkInterfaces*") {
+                $flowlogType = "NIC"
+            }
+            elseif ($flowlog.TargetResourceId -like "*subnets*") {
+                $flowlogType = "Subnet"
+            }
+            elseif ($flowlog.TargetResourceId -like "*virtualNetworks*") {
+                $flowlogType = "VNet"
+            }
+            elseif ($flowlog.TargetResourceId -like "*networkSecurityGroups*") {
+                $flowlogType = "NSG"
+            }
+            else {
+                $flowlogType = "Unknown"
+            }
+
+            # extract the resource group name from the target resource id
+            $ResourceGroupName = ($flowlog.TargetResourceId -split "/")[4]
+
+            # extract the resource name from the target resource id
+            $ResourceName = ($flowlog.TargetResourceId -split "/")[-1]
+
+            # create a new flow log object
+            $fl = [PSCustomObject]@{
+                Name               = $flowlog.Name
+                SubscriptionName   = $using:subscription
+                Location           = $using:Location
+                ResourceGroup      = $ResourceGroupName
+                TargetResourceName = $ResourceName
+                TargetResourceType = $flowlogType
+                Status             = if ($flowlog.Enabled) { "Enabled" } else { "Disabled" }
+            }
+
+            # add the object to the list of flow logs
+            ($using:flowlogs).Add($fl)
         }
 
-        # add the object to the list of flow logs
-        ($using:flowlogs).Add($fl)
-    }
-
-    # print the flow logs
-
-    $flowlogs | ForEach-Object {
-        $statusColor = "Cyan"
-        if ($_.Status -like "*Enabled*") {
-            $statusColor = "Green"
-        } elseif ($_.Status -like "*Disabled*") {
-            $statusColor = "Yellow"
+        # print the flow logs found in this subscription
+        $flowlogs | Where-Object { $_.SubscriptionName -eq $subscription } | ForEach-Object {
+            $statusColor = "Cyan"
+            if ($_.Status -like "*Enabled*") {
+                $statusColor = "Green"
+            }
+            elseif ($_.Status -like "*Disabled*") {
+                $statusColor = "Yellow"
+            }
+            Write-Host ("{0} ({1}): " -f $subscription, $Location) -NoNewline
+            Write-Host ("({0}) " -f $_.TargetResourceType) -ForegroundColor Cyan -NoNewline
+            Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
+            Write-Host $_.Status -ForegroundColor $statusColor
         }
-        Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
-        Write-Host ("({0}) " -f $_.TargetResourceType) -ForegroundColor Cyan -NoNewline
-        Write-Host $_.Status -ForegroundColor $statusColor
     }
 
     # export the list of flow logs to a CSV file
@@ -122,7 +159,9 @@ function ExportCSV {
     Write-Host "CSV file $CSVFile generated."
 }
 
+#################
 ### ImportCSV ###
+#################
 
 function ImportCSV {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -132,117 +171,185 @@ function ImportCSV {
         Write-Host -ForegroundColor Green "*** WhatIf mode enabled. No changes will be made."
     }
 
-    # get the network watcher
-    $networkWatcher = Get-AzNetworkWatcher -Location $Location
-    if (-not $networkWatcher) {
-        throw "Network Watcher not found in Location $($Location)"
+    # verify that the CSV file exists
+    if (-not (Test-Path $CSVFile)) {
+        throw "CSV file $($CSVFile) not found"
+    }
+
+    # read the first line of the CSV file to determine the delimiter
+    $delimiter = ""
+    try {
+        $delimiter = ((Get-Content -Path $CSVFile -TotalCount 1) -replace "[^,;]", "").Substring(0, 1)        
+    }
+    catch {
+        throw "Cannot read the first line of the CSV file $($CSVFile) to detect delimiters: make sure the file is not empty and has the correct CSV format."
     }
 
     # read the CSV file
     Write-Host "Reading CSV file $CSVFile..."
     $csvFlowlogs = $null
     try {
-        $csvFlowlogs = Import-Csv -Path $CSVFile -ErrorAction Stop        
+        $csvFlowlogs = Import-Csv -Path $CSVFile -Delimiter $delimiter -ErrorAction Stop        
     }
     catch {
         throw "Failed to read CSV file $($CSVFile): $($_.Exception.Message)"
     }
+    # ensure that the CSV file has the expected columns (Name, SubscriptionName, Location, ResourceGroup, TargetResourceName, TargetResourceType, Status)
+    if (-not ($csvFlowlogs[0].PSObject.Properties.Name -contains "Name" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "SubscriptionName" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "Location" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "ResourceGroup" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "TargetResourceName" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "TargetResourceType" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "Status")) {
+        throw "Invalid CSV file format. The file must have the following columns: Name, SubscriptionName, Location, ResourceGroup, TargetResourceName, TargetResourceType, Status"
+    }
+    # sort the flow logs by subscription name
+    $csvFlowLogs = $csvFlowlogs | Sort-Object -Property SubscriptionName
+    $csvFlowLogsCount = if ($csvFlowlogs -is [array]) { $csvFlowlogs.Count } else { 1 }
 
-    $processedFlowlogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    # count the number of flow logs and subscriptions
+    $subscriptions = ($csvFlowlogs | Select-Object -ExpandProperty SubscriptionName -Unique)
+    $subscriptionCount = if ($subscriptions -is [array]) { $subscriptions.Count } else { 1 }
+    Write-Host "Found $($csvFlowLogsCount) flow logs in $($subscriptionCount)) subscriptions in the CSV file."
 
-    # process the flow logs in parallel
-    Write-Host "Processing flow logs: "
-    $csvFlowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
+    # if a subscription filter was specified, check if it exists in the CSV file and use only that one
+    if ($SubscriptionFilter) {
+        if (-not ($subscriptions -contains $SubscriptionFilter)) {
+            throw "Subscription $($SubscriptionFilter) not found in the CSV file"
+        }
+        Write-Host "Note: a specific subscription was specified: $($SubscriptionFilter): processing only flow logs in this subscription." -ForegroundColor Yellow
+        $subscriptions = @($SubscriptionFilter)
+    }
+    
+    $currentSubscription = (Get-AzContext).Subscription.Name
+    $processedFlowLogs = [System.Collections.Concurrent.ConcurrentBag[object]]::new()    # thread-safe list of processed flow logs
 
-        $flowlog = $_
+    # loop through all subscriptions
+    foreach ($subscription in $subscriptions) {
 
-        $networkWatcherflowlog = $null
-        # get the flow log
-        try {
-            $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -NetworkWatcher $using:networkWatcher -Name $flowlog.Name -ErrorAction Stop          
-        }
-        catch {
-            $action = "FAILED to get: $($_.Exception.Message)"
-        }
+        Write-Host ("{0}: " -f $subscription) -NoNewline
 
-        if (-not $networkWatcherflowlog) {
-            # if the flow log is not found, skip it
+        # how many flow logs are in the file for this subscription?
+        $flowlogsInSubscription = $csvFlowlogs | Where-Object { $_.SubscriptionName -eq $subscription } | Measure-Object | Select-Object -ExpandProperty Count
+        if ($flowlogsInSubscription -eq 0) {
+            Write-Host "No flow logs found in this subscription, skipping" -ForegroundColor DarkGray
+            continue
         }
-        elseif ($flowlog.Status -eq "Enabled") {
-            if (-not $networkWatcherflowlog.Enabled) {
-                $networkWatcherflowlog.Enabled = $true
-                try {
-                    $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
-                    $action = "Enabled"                        
-                }
-                catch {
-                    $action = "FAILED to enable: $($_.Exception.Message)"
-                }
-            }
-            else {
-                $action = "Ignored (already enabled)"
-            }
-        }
-        elseif ($flowlog.Status -eq "Disabled") {
-            if ($networkWatcherflowlog.Enabled) {
-                $networkWatcherflowlog.Enabled = $false
-                try {
-                    $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
-                    $action = "Disabled"                        
-                }
-                catch {
-                    $action = "FAILED to disable: $($_.Exception.Message)"
-                }
-            }
-            else {
-                $action = "Ignored (already disabled)"
-            }
-        }
-        elseif ($flowlog.Status -eq "Deleted") {
+        Write-Host "($($flowlogsInSubscription) flow logs): " -NoNewline
+
+        # change the context to the specified subscription if needed
+        if ($subscription -ne $currentSubscription) {
             try {
-                Remove-AzNetworkWatcherFlowLog -ResourceId $networkWatcherflowlog.Id -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null                
-                $action = "Deleted"
+                Set-AzContext -SubscriptionName $subscription -ErrorAction Stop -WhatIf:$false | Out-Null       # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                $currentSubscription = $subscription
             }
             catch {
-                $action = "FAILED to delete: $($_.Exception.Message)"
+                throw "Failed to set subscription to $($subscription): $($_.Exception.Message)"
             }
         }
-        else {
-            throw "Invalid status $($flowlog.Status) for flow log $($flowlog.Name)"
-        }
 
-        # log the action done on flow log
-        $fl = [PSCustomObject]@{
-            Name               = $flowlog.Name
-            Action             = $action
+        $csvFlowlogs | Where-Object { $_.SubscriptionName -eq $subscription -and $_.Location -eq $Location } | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
+
+            $flowlog = $_
+
+            $networkWatcherflowlog = $null
+            # get the actual flow log from the network watcher of the subscription/location
+            try {
+                $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -Name $flowlog.Name -Location $flowlog.Location -ErrorAction Stop          
+            }
+            catch {
+                $action = "FAILED to get: $($_.Exception.Message)"
+            }
+
+            if (-not $networkWatcherflowlog) {
+                # if the flow log is not found or we had any other error, just skip it
+            }
+            elseif ($flowlog.Status -eq "Enabled") {
+                if (-not $networkWatcherflowlog.Enabled) {
+                    $networkWatcherflowlog.Enabled = $true
+                    try {
+                        $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
+                        $action = "Enabled"                        
+                    }
+                    catch {
+                        $action = "FAILED to enable: $($_.Exception.Message)"
+                    }
+                }
+                else {
+                    $action = "Ignored (already enabled)"
+                }
+            }
+            elseif ($flowlog.Status -eq "Disabled") {
+                if ($networkWatcherflowlog.Enabled) {
+                    $networkWatcherflowlog.Enabled = $false
+                    try {
+                        $networkWatcherflowLog | Set-AzNetworkWatcherFlowLog -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
+                        $action = "Disabled"                        
+                    }
+                    catch {
+                        $action = "FAILED to disable: $($_.Exception.Message)"
+                    }
+                }
+                else {
+                    $action = "Ignored (already disabled)"
+                }
+            }
+            elseif ($flowlog.Status -eq "Deleted") {
+                try {
+                    Remove-AzNetworkWatcherFlowLog -ResourceId $networkWatcherflowlog.Id -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null                
+                    $action = "Deleted"
+                }
+                catch {
+                    $action = "FAILED to delete: $($_.Exception.Message)"
+                }
+            }
+            else {
+                throw "Invalid status $($flowlog.Status) for flow log $($flowlog.Name)"
+            }
+
+            # log the action done on flow log
+            $fl = [PSCustomObject]@{
+                Name               = $flowlog.Name
+                SubscriptioNName   = $flowlog.SubscriptionName
+                TargetResourceType = $flowlog.TargetResourceType
+                Action             = $action
+            }
+        
+            # add the object to the list of processed flow logs for this subscription/location
+            ($using:processedFlowlogs).Add($fl)
+
+            # write progress dots
+            Write-Host -NoNewline "." -ForegroundColor DarkGray
         }
         
-        # add the object to the list of flow logs
-        ($using:processedFlowlogs).Add($fl)
+        # print the processed flow logs for this subscription, with colored "Action" column
+        Write-Host
+        $processedFlowlogs | Where-Object { $_.SubscriptionName -eq $subscription } | ForEach-Object {
+            $actionColor = "Cyan"
+            if ($_.Action -like "*FAILED*") {
+                $actionColor = "Red"
+            }
+            elseif ($_.Action -like "*Deleted*") {
+                $actionColor = "DarkYellow"
+            }
+            elseif ($_.Action -like '*Ignored*') {
+                $actionColor = "DarkGray"
+            }
+            elseif ($_.Action -like "*Enabled*") {
+                $actionColor = "Green"
+            }
+            elseif ($_.Action -like "*Disabled*") {
+                $actionColor = "Yellow"
+            }
 
-        # write progress dots
-        Write-Host -NoNewline "." -ForegroundColor DarkGray
-    }
-
-    # print the processed flow logs with colored "Action" column
-    Write-Host
-    $processedFlowlogs | ForEach-Object {
-        $actionColor = "Cyan"
-        if ($_.Action -like "*FAILED*") {
-            $actionColor = "Red"
-        } elseif ($_.Action -like "*Deleted*") {
-            $actionColor = "DarkYellow"
-        } elseif ($_.Action -like '*Ignored*') {
-            $actionColor = "DarkGray"
-        } elseif ($_.Action -like "*Enabled*") {
-            $actionColor = "Green"
-        } elseif ($_.Action -like "*Disabled*") {
-            $actionColor = "Yellow"
+            Write-Host ("{0} ({1}): " -f $subscription, $Location) -NoNewline
+            Write-Host ("({0}) " -f $_.TargetResourceType) -ForegroundColor Cyan -NoNewline
+            Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
+            Write-Host $_.Action -ForegroundColor $actionColor
         }
-
-        Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
-        Write-Host $_.Action -ForegroundColor $actionColor
     }
+
 }
 
 ########
@@ -251,7 +358,7 @@ function ImportCSV {
 
 # verify that Az module is installed
 if (-not (Get-Module -Name Az -ListAvailable)) {
-    throw "Please install the Az module before running this script"
+    throw "Please install the full Az module before running this script (https://learn.microsoft.com/en-us/powershell/azure/install-azps-windows)"
 }
 
 # verify that we have an active context
@@ -259,15 +366,8 @@ if (-not (Get-AzContext)) {
     throw "Please log in to Azure before running this script (use: Connect-AzAccount)"
 }
 
-# change the context to the specified subscription if needed
-try {
-    if ((Get-AzContext).Subscription.Name -ne $SubscriptionName) {
-        Set-AzContext -SubscriptionName $SubscriptionName -ErrorAction Stop | Out-Null
-    }        
-}
-catch {
-    throw "Failed to set subscription to $($SubscriptionName): $($_.Exception.Message)"
-}
+# use all low case for the location
+$Location = $Location.ToLower()
 
 # if GenerateCSV is specified, generate the CSV file and exit
 if ($ImportCSV) {
