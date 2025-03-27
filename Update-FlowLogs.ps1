@@ -5,7 +5,7 @@
 
     .DESCRIPTION
     This script extracts and saves into a CSV file the list of all flow logs found in one or all subscriptions, and a given location.
-    The CSV file can be edited and passed again to the script to enable/disable/delete the flow logs, according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted").
+    The CSV file can be edited and passed again to the script to enable/disable/delete the flow logs, according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted","Updated").
     By specifying -WhatIf, the script will only show what would be done without actually doing it.
     If the subscription name is not specified, the script will use all subscriptions contained in the file also during the import phase; otherwise, only the specified subscription will be processed.
 
@@ -23,6 +23,9 @@
 
     .PARAMETER ImportCSV
     Read a CSV file with the list of NSG flow logs in the given subscription and Location and enable/disable/remove them according to the Status column in the CSV file ("Enabled", "Disabled", "Deleted")
+
+    .PARAMETER TenantId
+    Tenant id or name (<name>.onmicrosoft.com) to use when operating on subscriptions. If not specified, the default tenant will be used.
 
     .EXAMPLE
     .\Change-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location italynorth -CSVFile .\flowlogs.csv -ImportCSV
@@ -43,7 +46,10 @@ param(
     [switch]$ExportCSV,
 
     [Parameter(Mandatory = $false, HelpMessage = "Read a CSV file with the list of NSG flow logs in the given subscription and Location and enable/disable/delete them according to the Status column in the CSV file")]
-    [switch]$ImportCSV
+    [switch]$ImportCSV,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Default tenant id or name (<name>.onmicrosoft.com) to use when operating on subscriptions.")]
+    [string]$TenantId = $null
 )
 
 Set-StrictMode -Version Latest
@@ -56,7 +62,7 @@ function ExportCSV {
     # if no subscription filter is specified, get all subscriptions
     if (-not $SubscriptionFilter) {
         Write-Host "No subscription filter specified. Getting the list of all subscriptions."
-        $subscriptions = (Get-AzSubscription).Name
+        $subscriptions = (Get-AzSubscription -TenantId $TenantId).Name
         if (-not $subscriptions) {
             throw "No subscriptions found - check your permissions."
         }
@@ -78,7 +84,14 @@ function ExportCSV {
         # change the context to the specified subscription if needed
         if ($subscription -ne $currentSubscription) {
             try {
-                Set-AzContext -SubscriptionName $subscription -ErrorAction Stop | Out-Null
+                if ($TenantId) {
+                    # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                    Set-AzContext -SubscriptionName $subscription -TenantId $TenantId -ErrorAction Stop | Out-Null
+                }
+                else {
+                    # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                    Set-AzContext -SubscriptionName $subscription -ErrorAction Stop | Out-Null
+                }
                 $currentSubscription = $subscription
             }
             catch {
@@ -96,7 +109,8 @@ function ExportCSV {
             Write-Host "$networkWatcherflowLogCount flow logs found:"
         }
 
-        # Prepare the list of flow logs. For each one, take the name, the target resource (detects if NSG, VNet, subnet or single nic) and the status
+        # Prepare the list of flow logs. For each one, take the name, the target resource (detects if NSG, VNet, subnet or single nic) the status
+        # Also, check if traffic analytics is enabled and in this case extract the interval
         $networkWatcherflowlogs | Foreach-Object -ThrottleLimit ([Environment]::ProcessorCount) -Parallel {
 
             $flowlog = $_
@@ -123,6 +137,13 @@ function ExportCSV {
             # extract the resource name from the target resource id
             $ResourceName = ($flowlog.TargetResourceId -split "/")[-1]
 
+            if ($null -ne $flowlog.FlowAnalyticsConfiguration) {
+                $TAInterval = $flowlog.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration.TrafficAnalyticsInterval
+            }
+            else {
+                $TAInterval = "N/A"
+            }
+
             # create a new flow log object
             $fl = [PSCustomObject]@{
                 Name               = $flowlog.Name
@@ -132,6 +153,7 @@ function ExportCSV {
                 TargetResourceName = $ResourceName
                 TargetResourceType = $flowlogType
                 Status             = if ($flowlog.Enabled) { "Enabled" } else { "Disabled" }
+                TAInterval         = $TAInterval
             }
 
             # add the object to the list of flow logs
@@ -150,7 +172,14 @@ function ExportCSV {
             Write-Host ("{0} ({1}): " -f $subscription, $Location) -NoNewline
             Write-Host ("({0}) " -f $_.TargetResourceType) -ForegroundColor Cyan -NoNewline
             Write-Host ("{0}: " -f $_.Name) -ForegroundColor White -NoNewline
-            Write-Host $_.Status -ForegroundColor $statusColor
+            Write-Host $_.Status -ForegroundColor $statusColor -NoNewline
+            if ($_.TAInterval -ne "N/A") {
+                Write-Host (" (TA interval: {0})" -f $_.TAInterval) -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host ""
+            }
+
         }
     }
 
@@ -201,8 +230,9 @@ function ImportCSV {
             $csvFlowlogs[0].PSObject.Properties.Name -contains "ResourceGroup" -and
             $csvFlowlogs[0].PSObject.Properties.Name -contains "TargetResourceName" -and
             $csvFlowlogs[0].PSObject.Properties.Name -contains "TargetResourceType" -and
-            $csvFlowlogs[0].PSObject.Properties.Name -contains "Status")) {
-        throw "Invalid CSV file format. The file must have the following columns: Name, SubscriptionName, Location, ResourceGroup, TargetResourceName, TargetResourceType, Status"
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "Status" -and
+            $csvFlowlogs[0].PSObject.Properties.Name -contains "TAInterval")) {
+        throw "Invalid CSV file format. The file must have the following columns: Name, SubscriptionName, Location, ResourceGroup, TargetResourceName, TargetResourceType, Status and TAInterval"
     }
     # sort the flow logs by subscription name
     $csvFlowLogs = $csvFlowlogs | Sort-Object -Property SubscriptionName
@@ -211,7 +241,7 @@ function ImportCSV {
     # count the number of flow logs and subscriptions
     $subscriptions = ($csvFlowlogs | Select-Object -ExpandProperty SubscriptionName -Unique)
     $subscriptionCount = if ($subscriptions -is [array]) { $subscriptions.Count } else { 1 }
-    Write-Host "Found $($csvFlowLogsCount) flow logs in $($subscriptionCount)) subscriptions in the CSV file."
+    Write-Host "Found $($csvFlowLogsCount) flow logs in $($subscriptionCount) subscription(s) in the CSV file."
 
     # if a subscription filter was specified, check if it exists in the CSV file and use only that one
     if ($SubscriptionFilter) {
@@ -241,7 +271,14 @@ function ImportCSV {
         # change the context to the specified subscription if needed
         if ($subscription -ne $currentSubscription) {
             try {
-                Set-AzContext -SubscriptionName $subscription -ErrorAction Stop -WhatIf:$false | Out-Null       # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                if ($TenantId) {
+                    # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                    Set-AzContext -SubscriptionName $subscription -TenantId $TenantId -ErrorAction Stop -WhatIf:$false | Out-Null
+                }
+                else {
+                    # do the actual change, even if -WhatIf is specified, to avoid verbose messages
+                    Set-AzContext -SubscriptionName $subscription -ErrorAction Stop -WhatIf:$false| Out-Null
+                }
                 $currentSubscription = $subscription
             }
             catch {
@@ -254,7 +291,7 @@ function ImportCSV {
             $flowlog = $_
 
             $networkWatcherflowlog = $null
-            # get the actual flow log from the network watcher of the subscription/location
+            # get the actual flow log
             try {
                 $networkWatcherflowlog = Get-AzNetworkWatcherFlowLog -Name $flowlog.Name -Location $flowlog.Location -ErrorAction Stop          
             }
@@ -302,6 +339,25 @@ function ImportCSV {
                 }
                 catch {
                     $action = "FAILED to delete: $($_.Exception.Message)"
+                }
+            }
+            elseif ($flowlog.Status -eq "Updated") {
+                # update the flow log with the new TA interval
+                try {
+                    Set-AzNetworkWatcherFlowLog `
+                    -Enabled $networkWatcherflowlog.Enabled `
+                    -Name $networkWatcherflowlog.Name `
+                    -TargetResourceId $networkWatcherflowlog.TargetResourceId `
+                    -StorageId $networkWatcherflowlog.StorageId `
+                    -EnableTrafficAnalytics:$networkWatcherflowlog.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration.Enabled `
+                    -TrafficAnalyticsInterval $flowlog.TAInterval `
+                    -TrafficAnalyticsWorkspaceId $networkWatcherflowlog.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration.WorkspaceResourceId `
+                    -Location $networkWatcherflowlog.Location `
+                    -Force -WhatIf:$using:WhatIfPreference -ErrorAction Stop | Out-Null
+                    $action = "Updated"                        
+                }
+                catch {
+                    $action = "FAILED to update: $($_.Exception.Message)"
                 }
             }
             else {
@@ -369,13 +425,14 @@ if (-not (Get-AzContext)) {
 # use all low case for the location
 $Location = $Location.ToLower()
 
-# if GenerateCSV is specified, generate the CSV file and exit
-if ($ImportCSV) {
-    ImportCSV
+# if ExportCSV is specified, generate the CSV file and exit
+if ($ExportCSV) {
+    ExportCSV
 }
 
-elseif ($ExportCSV) {
-    ExportCSV
+# otherwise, if ImportCSV is specified, read the CSV file and process it
+elseif ($ImportCSV) {
+    ImportCSV
 }
 
 else {
