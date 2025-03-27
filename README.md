@@ -8,7 +8,7 @@ Based on the **Status** column, the following happens:
 * `Enabled`: the flow log is enabled. If already enabled, nothing happens
 * `Disabled`: the flow log is disabled. If already disabled, nothing happens
 * `Deleted`: the flow log is deleted
-* `Updated`: the TAInterval is updated
+* `Updated`: the Traffic Analytics Interval (TAInterval) is updated
 
 Example to get the current flow logs from all subscriptions:
 
