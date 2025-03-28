@@ -349,6 +349,8 @@ function ImportCSV {
                     -Name $networkWatcherflowlog.Name `
                     -TargetResourceId $networkWatcherflowlog.TargetResourceId `
                     -StorageId $networkWatcherflowlog.StorageId `
+                    -EnableRetention $true `
+                    -RetentionPolicyDays 10 `
                     -EnableTrafficAnalytics:$networkWatcherflowlog.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration.Enabled `
                     -TrafficAnalyticsInterval $flowlog.TAInterval `
                     -TrafficAnalyticsWorkspaceId $networkWatcherflowlog.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration.WorkspaceResourceId `
