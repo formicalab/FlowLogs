@@ -8,7 +8,7 @@ Example to get the current flow logs:
 
     .\Update-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location ItalyNorth -CSVFile .\flowlogs.csv -ExportCSV
 
-Once the CSV has been edited to specify which flows should be enabled, disabled or deleted, execute the following to apply the changes:
+Once the CSV has been edited to specify which flows should be enabled, disabled, updated or deleted, execute the following to apply the changes:
 
     .\Update-FlowLogs.ps1 -SubscriptionName PRODUZIONE -Location ItalyNorth -CSVFile .\flowlogs.csv -ImportCSV
 
