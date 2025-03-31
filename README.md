@@ -2,7 +2,7 @@
 
 When used with the `ExportCSV` parameter, this script extracts all flow logs (NSG or VNet) found in a given subscription and location and generates a CSV file with their list.
 
-The CSV file can then be edited and passed again to the script, with the `ImportCSV` parameter,  to enable/disable/update/delete the flow logs, according to the values set in the **Status** column in the CSV file (`Enabled`, `Disabled`, `Disabled`, `Deleted`). For maximum safety, by specifying `-WhatIf`, the script will only show what would be done without actually doing it.
+The CSV file can then be edited and passed again to the script, with the `ImportCSV` parameter,  to enable/disable/update/delete the flow logs, according to the values set in the **Status** column in the CSV file (`Enabled`, `Disabled`, `Updated`, `Deleted`). For maximum safety, by specifying `-WhatIf`, the script will only show what would be done without actually doing it.
 
 Example to get the current flow logs:
 
